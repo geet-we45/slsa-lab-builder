@@ -1,0 +1,65 @@
+# Trusted SLSA Build L3 reusable workflow.
+# Isolation rule: no input may accept arbitrary commands, scripts, or build flags.
+# That restriction is what preserves Build L3 — the tenant cannot influence how
+# the binary is built or how provenance is signed.
+name: SLSA Lab Builder
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: Output binary name (also used as the artifact upload name)
+        required: true
+        type: string
+      go-dir:
+        description: Directory containing go.mod and the main package
+        required: false
+        type: string
+        default: app
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: ${{ inputs.go-dir }}/go.mod
+
+      - name: Build
+        env:
+          ARTIFACT_NAME: ${{ inputs.artifact-name }}
+          GO_DIR: ${{ inputs.go-dir }}
+        run: |
+          # go.mod lives under GO_DIR; go build -C (Go ≥1.20) sets the module root.
+          mkdir -p dist
+          CGO_ENABLED=0 go build -C "${GO_DIR}" -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o "${GITHUB_WORKSPACE}/dist/${ARTIFACT_NAME}" .
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/${{ inputs.artifact-name }}
+
+      - name: Copy attestation bundle beside binary
+        env:
+          ARTIFACT_NAME: ${{ inputs.artifact-name }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "${BUNDLE_PATH}" "dist/${ARTIFACT_NAME}.bundle.jsonl"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist/*
